@@ -8,13 +8,14 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
 
 export async function POST(req: Request) {
   const body = await req.text()
-  const sig = headers().get('stripe-signature')! // bez await
+  const incomingHeaders = await headers()  // tutaj await!
+  const sig = incomingHeaders.get('stripe-signature')!  // teraz get() jest na obiekcie Headers
 
   try {
     const event = stripe.webhooks.constructEvent(
       body,
       sig,
-      process.env.STRIPE_WEBHOOK_SECRET! // tutaj whsec_... z `stripe listen`
+      process.env.STRIPE_WEBHOOK_SECRET!
     )
 
     switch (event.type) {
