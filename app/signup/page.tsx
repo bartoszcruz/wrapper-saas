@@ -34,6 +34,7 @@ export default function SignupPage() {
         router.refresh();
       }
     } catch (err) {
+      console.error(err); // 👈 teraz zmienna użyta
       setError('An unexpected error occurred');
       setLoading(false);
     }

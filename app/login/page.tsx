@@ -34,6 +34,7 @@ export default function LoginPage() {
         router.refresh();
       }
     } catch (err) {
+      console.error(err); // 👈 teraz err jest użyty
       setError('An unexpected error occurred');
       setLoading(false);
     }
@@ -101,7 +102,7 @@ export default function LoginPage() {
           </button>
 
           <p className="text-center text-sm text-muted-foreground">
-            Don't have an account?{' '}
+            Don&apos;t have an account?{' '}
             <Link href="/signup" className="font-medium text-foreground hover:underline">
               Sign up
             </Link>
