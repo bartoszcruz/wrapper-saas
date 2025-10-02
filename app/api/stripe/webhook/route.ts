@@ -29,8 +29,12 @@ export async function POST(req: Request) {
     }
 
     return NextResponse.json({ received: true }, { status: 200 })
-  } catch (err: any) {
-    console.error('❌ Webhook error:', err.message)
+  } catch (err: unknown) {
+    if (err instanceof Error) {
+      console.error('❌ Webhook error:', err.message)
+    } else {
+      console.error('❌ Unknown webhook error:', err)
+    }
     return NextResponse.json({ error: 'Webhook error' }, { status: 400 })
   }
 }
