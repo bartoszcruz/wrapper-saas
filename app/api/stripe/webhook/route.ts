@@ -8,14 +8,13 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
 
 export async function POST(req: Request) {
   const body = await req.text()
-  const incomingHeaders = await headers()
-  const sig = incomingHeaders.get('stripe-signature')!
+  const sig = headers().get('stripe-signature')! // bez await
 
   try {
     const event = stripe.webhooks.constructEvent(
       body,
       sig,
-      process.env.STRIPE_WEBHOOK_SECRET!
+      process.env.STRIPE_WEBHOOK_SECRET! // tutaj whsec_... z `stripe listen`
     )
 
     switch (event.type) {
@@ -26,12 +25,12 @@ export async function POST(req: Request) {
         console.log('🔄 Subscription updated', event.data.object)
         break
       default:
-        console.log('Unhandled event type', event.type)
+        console.log('⚠️ Unhandled event type', event.type)
     }
 
-    return NextResponse.json({ received: true })
-  } catch (err) {
-    console.error(err)
+    return NextResponse.json({ received: true }, { status: 200 })
+  } catch (err: any) {
+    console.error('❌ Webhook error:', err.message)
     return NextResponse.json({ error: 'Webhook error' }, { status: 400 })
   }
 }
