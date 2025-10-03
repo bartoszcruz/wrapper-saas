@@ -17,12 +17,25 @@ export default function SignupPage() {
     setError('');
     setLoading(true);
 
+    // Ensure app URL is configured
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL;
+    if (!appUrl) {
+      console.error('[Signup] NEXT_PUBLIC_APP_URL not configured');
+      setError('Application is not properly configured. Please contact support.');
+      setLoading(false);
+      return;
+    }
+
     try {
       const supabase = createSupabaseBrowserClient();
 
+      // Sign up with email redirect to dashboard after confirmation
       const { data, error: signUpError } = await supabase.auth.signUp({
         email,
         password,
+        options: {
+          emailRedirectTo: `${appUrl}/dashboard`, // Redirect to dashboard after email confirmation
+        },
       });
 
       if (signUpError) {
