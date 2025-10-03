@@ -27,13 +27,15 @@ export async function POST(req: Request) {
 
     console.log('[Webhook] Event received:', event.type, event.id);
 
-    // Log webhook event to database for audit trail
+    // Log FULL webhook event to database for complete audit trail
+    // Table schema: id (int8 PK), event_id (text), type (text), raw (jsonb), created_at (timestamptz)
     try {
       await supabase.from('webhook_events').insert({
         event_id: event.id,
-        event_type: event.type,
-        payload: event.data.object,
+        type: event.type,
+        raw: event,  // ✅ Full event object (not just data.object)
       });
+      console.log('[Webhook] Full event logged to database');
     } catch (logError) {
       console.error('[Webhook] Failed to log event to database:', logError);
       // Continue processing even if logging fails
@@ -105,12 +107,6 @@ export async function POST(req: Request) {
           planId: plan.plan_id,
           limit: plan.monthly_limit,
         });
-
-        // Update webhook_events with user_id now that we know it
-        await supabase
-          .from('webhook_events')
-          .update({ user_id: userId })
-          .eq('event_id', event.id);
 
         // Update profile with plan info
         // Note: current_period_end will be set by customer.subscription.created event
@@ -235,7 +231,7 @@ export async function POST(req: Request) {
         // Find user by subscription_id
         const { data: profile, error: profileError } = await supabase
           .from('profiles')
-          .select('id')
+          .select('id, plan_id')
           .eq('stripe_subscription_id', subscription.id)
           .single();
 
@@ -246,14 +242,14 @@ export async function POST(req: Request) {
 
         const userId = profile.id;
 
-        // Find plan by price_id
-        const { data: plan, error: planError } = await supabase
+        // Find NEW plan by price_id
+        const { data: newPlan, error: planError } = await supabase
           .from('plans')
           .select('plan_id, name, monthly_limit')
           .or(`stripe_price_id_pln.eq.${priceId},stripe_price_id_usd.eq.${priceId}`)
           .single();
 
-        if (planError || !plan) {
+        if (planError || !newPlan) {
           console.error('[Webhook] Plan not found for price_id:', priceId);
           // Update status only
           const subData = subscription as unknown as Record<string, unknown>;
@@ -273,9 +269,9 @@ export async function POST(req: Request) {
           break;
         }
 
-        console.log(`[Webhook] Detected plan ${plan.name} for user ${userId}`, {
-          planId: plan.plan_id,
-          limit: plan.monthly_limit,
+        console.log(`[Webhook] Detected plan ${newPlan.name} for user ${userId}`, {
+          planId: newPlan.plan_id,
+          limit: newPlan.monthly_limit,
         });
 
         // Calculate current_period_end
@@ -284,14 +280,33 @@ export async function POST(req: Request) {
           ? new Date(subData.current_period_end * 1000).toISOString()
           : null;
 
+        // Detect if this is upgrade or downgrade
+        const { data: oldPlan } = await supabase
+          .from('plans')
+          .select('monthly_limit')
+          .eq('plan_id', profile.plan_id)
+          .single();
+
+        const isDowngrade = oldPlan && newPlan.monthly_limit < oldPlan.monthly_limit;
+
         // Update profile with new plan
+        const updateData: Record<string, unknown> = {
+          plan_id: newPlan.plan_id,
+          active: subscription.status === 'active',
+          current_period_end: currentPeriodEnd,
+        };
+
+        // ✅ SANITY CHECK: Reset usage on downgrade, keep on upgrade
+        if (isDowngrade) {
+          updateData.plan_used = 0;
+          console.log('[Webhook] Downgrade detected, resetting usage to 0');
+        } else {
+          console.log('[Webhook] Upgrade detected, preserving usage');
+        }
+
         const { error: updateError } = await supabase
           .from('profiles')
-          .update({
-            plan_id: plan.plan_id,
-            active: subscription.status === 'active',
-            current_period_end: currentPeriodEnd,
-          })
+          .update(updateData)
           .eq('id', userId);
 
         if (updateError) {
@@ -299,9 +314,10 @@ export async function POST(req: Request) {
         } else {
           console.log('✅ Subscription updated:', {
             userId,
-            plan: plan.name,
-            planId: plan.plan_id,
+            plan: newPlan.name,
+            planId: newPlan.plan_id,
             status: subscription.status,
+            isDowngrade,
           });
         }
 
@@ -326,7 +342,7 @@ export async function POST(req: Request) {
           break;
         }
 
-        // Check if subscription has ended or is still in grace period
+        // ✅ GRACE PERIOD CHECK: Don't downgrade immediately
         const currentPeriodEnd = typeof subData.current_period_end === 'number'
           ? new Date(subData.current_period_end * 1000)
           : null;
@@ -335,21 +351,21 @@ export async function POST(req: Request) {
         const isGracePeriod = currentPeriodEnd && currentPeriodEnd > now;
 
         if (isGracePeriod) {
-          // User cancelled but still has access until period end
+          // User cancelled but still has paid access until period end
           console.log('[Webhook] Subscription cancelled, keeping access until:', currentPeriodEnd.toISOString());
 
-          // Keep current plan, mark as ending soon, but keep active
+          // Keep current plan, mark as ending soon
           await supabase
             .from('profiles')
             .update({
-              active: false, // Mark as non-renewing
+              active: false, // Mark as non-renewing (won't auto-bill)
               current_period_end: currentPeriodEnd.toISOString(),
             })
             .eq('id', profile.id);
 
           console.log('✅ Subscription will end at period:', profile.id, currentPeriodEnd);
         } else {
-          // Period has ended, downgrade to basic immediately
+          // Period has ended, now safe to downgrade
           const { data: basicPlan } = await supabase
             .from('plans')
             .select('plan_id')
@@ -362,7 +378,7 @@ export async function POST(req: Request) {
               plan_id: basicPlan?.plan_id || null,
               active: false,
               current_period_end: null,
-              plan_used: 0, // Reset usage when downgrading
+              plan_used: 0, // ✅ Reset usage when downgrading
             })
             .eq('id', profile.id);
 
@@ -402,7 +418,7 @@ export async function POST(req: Request) {
 
         const userId = profile.id;
 
-        // Reset usage counter for new billing period
+        // ✅ NEW BILLING PERIOD: Reset usage counter
         const updateData: Record<string, unknown> = {
           plan_used: 0,
         };
@@ -457,8 +473,8 @@ export async function POST(req: Request) {
 
         const userId = profile.id;
 
-        // Only deactivate if Stripe has given up (no more retry attempts)
-        // Stripe will send this event multiple times as it retries
+        // ✅ RETRY LOGIC: Only deactivate if Stripe has given up (no more retry attempts)
+        // Stripe will send this event multiple times as it retries (up to 4 attempts)
         const hasMoreAttempts = invoiceData.next_payment_attempt !== null;
 
         if (hasMoreAttempts) {
