@@ -101,6 +101,7 @@ export async function GET() {
         plan_price_pln: null,
         stripe_price_id_pln: null,
         stripe_price_id_usd: null,
+        stripe_customer_id: null,
         profileMissing: true, // Flag to indicate profile needs setup
       }, { status: 200 });
     }
@@ -126,6 +127,7 @@ export async function GET() {
       plan_price_pln: profile.plans?.price_pln || null,
       stripe_price_id_pln: profile.plans?.stripe_price_id_pln || null,
       stripe_price_id_usd: profile.plans?.stripe_price_id_usd || null,
+      stripe_customer_id: profile.stripe_customer_id || null,
       profileMissing: false,
     };
 

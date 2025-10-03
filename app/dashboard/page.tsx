@@ -13,7 +13,9 @@ interface UserProfile {
   current_period_end: string | null;
   plan_price_usd: number | null;
   plan_price_pln: number | null;
-  stripe_price_id: string | null;
+  stripe_price_id_pln: string | null;
+  stripe_price_id_usd: string | null;
+  stripe_customer_id?: string | null;
   profileMissing?: boolean;
 }
 
@@ -235,6 +237,70 @@ export default function DashboardPage() {
             </p>
           )}
         </div>
+
+        {/* Subscription Details */}
+        {hasPlan && profile.active && (
+          <div className="bg-card border border-border rounded-lg p-6 space-y-4">
+            <h2 className="text-xl font-semibold">Subscription Details</h2>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+              <div>
+                <p className="text-muted-foreground">Status</p>
+                <p className="font-medium">
+                  {profile.active ? (
+                    <span className="text-green-600 dark:text-green-400">● Active</span>
+                  ) : (
+                    <span className="text-red-600 dark:text-red-400">● Inactive</span>
+                  )}
+                </p>
+              </div>
+
+              {profile.current_period_end && (
+                <div>
+                  <p className="text-muted-foreground">Next billing date</p>
+                  <p className="font-medium">
+                    {new Date(profile.current_period_end).toLocaleDateString('en-US', {
+                      year: 'numeric',
+                      month: 'long',
+                      day: 'numeric'
+                    })}
+                  </p>
+                </div>
+              )}
+
+              {profile.plan_price_pln !== null && (
+                <div>
+                  <p className="text-muted-foreground">Price (PLN)</p>
+                  <p className="font-medium">{profile.plan_price_pln} zł/month</p>
+                </div>
+              )}
+
+              {profile.plan_price_usd !== null && (
+                <div>
+                  <p className="text-muted-foreground">Price (USD)</p>
+                  <p className="font-medium">${profile.plan_price_usd}/month</p>
+                </div>
+              )}
+            </div>
+
+            {/* Customer Portal Button */}
+            {profile.stripe_customer_id && (
+              <div className="pt-4 border-t border-border">
+                <form action="/api/customer-portal" method="POST">
+                  <button
+                    type="submit"
+                    className="w-full sm:w-auto px-4 py-2 border border-border rounded-md hover:bg-accent transition-colors text-sm font-medium"
+                  >
+                    Manage Subscription →
+                  </button>
+                </form>
+                <p className="text-xs text-muted-foreground mt-2">
+                  Update payment method, view invoices, or cancel subscription
+                </p>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Generate Section */}
         <div className="bg-card border border-border rounded-lg p-6 space-y-4">
