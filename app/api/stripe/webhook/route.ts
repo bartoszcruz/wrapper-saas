@@ -27,6 +27,18 @@ export async function POST(req: Request) {
 
     console.log('[Webhook] Event received:', event.type, event.id);
 
+    // Log webhook event to database for audit trail
+    try {
+      await supabase.from('webhook_events').insert({
+        event_id: event.id,
+        event_type: event.type,
+        payload: event.data.object,
+      });
+    } catch (logError) {
+      console.error('[Webhook] Failed to log event to database:', logError);
+      // Continue processing even if logging fails
+    }
+
     switch (event.type) {
       case 'checkout.session.completed': {
         const session = event.data.object as Stripe.Checkout.Session;
@@ -93,6 +105,12 @@ export async function POST(req: Request) {
           planId: plan.plan_id,
           limit: plan.monthly_limit,
         });
+
+        // Update webhook_events with user_id now that we know it
+        await supabase
+          .from('webhook_events')
+          .update({ user_id: userId })
+          .eq('event_id', event.id);
 
         // Update profile with plan info
         // Note: current_period_end will be set by customer.subscription.created event
@@ -381,6 +399,51 @@ export async function POST(req: Request) {
           console.error('[Webhook] Error resetting usage:', updateError);
         } else {
           console.log('✅ Usage reset for new period:', userId);
+        }
+
+        break;
+      }
+
+      case 'invoice.payment_failed': {
+        const invoice = event.data.object as Stripe.Invoice;
+        const invoiceData = invoice as unknown as Record<string, unknown>;
+
+        console.log('[Webhook] Invoice payment failed:', {
+          invoiceId: invoice.id,
+          subscriptionId: invoiceData.subscription,
+          attemptCount: invoiceData.attempt_count,
+        });
+
+        // Only process if this is a subscription invoice
+        if (!invoiceData.subscription) {
+          console.log('[Webhook] Non-subscription invoice, skipping');
+          break;
+        }
+
+        // Find user by stripe_subscription_id
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('id')
+          .eq('stripe_subscription_id', invoiceData.subscription as string)
+          .single();
+
+        if (profileError || !profile) {
+          console.error('[Webhook] Profile not found for subscription:', invoiceData.subscription);
+          break;
+        }
+
+        const userId = profile.id;
+
+        // Deactivate subscription (payment failed)
+        const { error: updateError } = await supabase
+          .from('profiles')
+          .update({ active: false })
+          .eq('id', userId);
+
+        if (updateError) {
+          console.error('[Webhook] Error deactivating subscription:', updateError);
+        } else {
+          console.log('⚠️ Payment failed, subscription deactivated:', userId);
         }
 
         break;

@@ -21,7 +21,26 @@ export async function POST(request: Request) {
 
     console.log('[/api/checkout] User:', user.id, user.email);
 
-    // 2. Parse FormData
+    // 2. Check for existing active subscription and cancel it
+    const { data: existingProfile } = await supabase
+      .from('profiles')
+      .select('stripe_subscription_id, active')
+      .eq('id', user.id)
+      .single();
+
+    if (existingProfile?.stripe_subscription_id && existingProfile.active) {
+      console.log('[Checkout] User has active subscription, cancelling:', existingProfile.stripe_subscription_id);
+
+      try {
+        await stripe.subscriptions.cancel(existingProfile.stripe_subscription_id);
+        console.log('[Checkout] Cancelled old subscription for user', user.id);
+      } catch (cancelError) {
+        console.error('[Checkout] Error cancelling old subscription:', cancelError);
+        // Continue anyway - allow new subscription creation
+      }
+    }
+
+    // 3. Parse FormData
     const formData = await request.formData();
     const planName = formData.get('plan') as string | null;
     const currency = formData.get('currency') as string | null;
