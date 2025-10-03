@@ -310,10 +310,11 @@ export async function POST(req: Request) {
 
       case 'customer.subscription.deleted': {
         const subscription = event.data.object as Stripe.Subscription;
+        const subData = subscription as unknown as Record<string, unknown>;
 
         console.log('[Webhook] Subscription deleted:', subscription.id);
 
-        // Find user and downgrade to basic (or set plan_id to null)
+        // Find user
         const { data: profile, error: profileError } = await supabase
           .from('profiles')
           .select('id')
@@ -325,26 +326,47 @@ export async function POST(req: Request) {
           break;
         }
 
-        // Find basic plan
-        const { data: basicPlan } = await supabase
-          .from('plans')
-          .select('plan_id')
-          .ilike('name', 'basic')
-          .single();
+        // Check if subscription has ended or is still in grace period
+        const currentPeriodEnd = typeof subData.current_period_end === 'number'
+          ? new Date(subData.current_period_end * 1000)
+          : null;
 
-        const { error: updateError } = await supabase
-          .from('profiles')
-          .update({
-            plan_id: basicPlan?.plan_id || null,
-            active: false,
-            current_period_end: null,
-          })
-          .eq('id', profile.id);
+        const now = new Date();
+        const isGracePeriod = currentPeriodEnd && currentPeriodEnd > now;
 
-        if (updateError) {
-          console.error('[Webhook] Error downgrading user:', updateError);
+        if (isGracePeriod) {
+          // User cancelled but still has access until period end
+          console.log('[Webhook] Subscription cancelled, keeping access until:', currentPeriodEnd.toISOString());
+
+          // Keep current plan, mark as ending soon, but keep active
+          await supabase
+            .from('profiles')
+            .update({
+              active: false, // Mark as non-renewing
+              current_period_end: currentPeriodEnd.toISOString(),
+            })
+            .eq('id', profile.id);
+
+          console.log('✅ Subscription will end at period:', profile.id, currentPeriodEnd);
         } else {
-          console.log('✅ User downgraded to basic:', profile.id);
+          // Period has ended, downgrade to basic immediately
+          const { data: basicPlan } = await supabase
+            .from('plans')
+            .select('plan_id')
+            .ilike('name', 'basic')
+            .single();
+
+          await supabase
+            .from('profiles')
+            .update({
+              plan_id: basicPlan?.plan_id || null,
+              active: false,
+              current_period_end: null,
+              plan_used: 0, // Reset usage when downgrading
+            })
+            .eq('id', profile.id);
+
+          console.log('✅ User downgraded to basic (period ended):', profile.id);
         }
 
         break;
@@ -412,6 +434,7 @@ export async function POST(req: Request) {
           invoiceId: invoice.id,
           subscriptionId: invoiceData.subscription,
           attemptCount: invoiceData.attempt_count,
+          nextPaymentAttempt: invoiceData.next_payment_attempt,
         });
 
         // Only process if this is a subscription invoice
@@ -434,7 +457,17 @@ export async function POST(req: Request) {
 
         const userId = profile.id;
 
-        // Deactivate subscription (payment failed)
+        // Only deactivate if Stripe has given up (no more retry attempts)
+        // Stripe will send this event multiple times as it retries
+        const hasMoreAttempts = invoiceData.next_payment_attempt !== null;
+
+        if (hasMoreAttempts) {
+          console.log('[Webhook] Payment failed but Stripe will retry, keeping subscription active');
+          // Don't deactivate yet - Stripe will try again
+          break;
+        }
+
+        // Final attempt failed, deactivate
         const { error: updateError } = await supabase
           .from('profiles')
           .update({ active: false })
@@ -443,7 +476,7 @@ export async function POST(req: Request) {
         if (updateError) {
           console.error('[Webhook] Error deactivating subscription:', updateError);
         } else {
-          console.log('⚠️ Payment failed, subscription deactivated:', userId);
+          console.log('⚠️ Payment failed (final attempt), subscription deactivated:', userId);
         }
 
         break;
