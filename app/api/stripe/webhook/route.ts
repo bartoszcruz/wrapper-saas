@@ -52,14 +52,15 @@ export async function POST(req: Request) {
           break;
         }
 
-        const subscription = await stripe.subscriptions.retrieve(
-          session.subscription as string
-        );
+        // Expand session to get line_items with price info
+        const expandedSession = await stripe.checkout.sessions.retrieve(session.id, {
+          expand: ['line_items'],
+        });
 
-        const priceId = subscription.items.data[0]?.price.id;
+        const priceId = expandedSession.line_items?.data[0]?.price?.id;
 
         if (!priceId) {
-          console.error('[Webhook] No price ID found in subscription');
+          console.error('[Webhook] No price ID found in session line_items');
           break;
         }
 
@@ -94,6 +95,7 @@ export async function POST(req: Request) {
         });
 
         // Update profile with plan info
+        // Note: current_period_end will be set by customer.subscription.created event
         const { error: updateError } = await supabase
           .from('profiles')
           .update({
@@ -101,9 +103,6 @@ export async function POST(req: Request) {
             active: true,
             stripe_customer_id: session.customer as string,
             stripe_subscription_id: session.subscription as string,
-            current_period_end: subscription.current_period_end
-              ? new Date(subscription.current_period_end * 1000).toISOString()
-              : null,
           })
           .eq('id', userId);
 
@@ -169,6 +168,12 @@ export async function POST(req: Request) {
           limit: plan.monthly_limit,
         });
 
+        // Calculate current_period_end from subscription
+        const subData = subscription as unknown as Record<string, unknown>;
+        const currentPeriodEnd = typeof subData.current_period_end === 'number'
+          ? new Date(subData.current_period_end * 1000).toISOString()
+          : null;
+
         // Update profile
         const { error: updateError } = await supabase
           .from('profiles')
@@ -176,9 +181,7 @@ export async function POST(req: Request) {
             plan_id: plan.plan_id,
             active: subscription.status === 'active',
             stripe_subscription_id: subscription.id,
-            current_period_end: subscription.current_period_end
-              ? new Date(subscription.current_period_end * 1000).toISOString()
-              : null,
+            current_period_end: currentPeriodEnd,
           })
           .eq('id', userId);
 
@@ -235,13 +238,16 @@ export async function POST(req: Request) {
         if (planError || !plan) {
           console.error('[Webhook] Plan not found for price_id:', priceId);
           // Update status only
+          const subData = subscription as unknown as Record<string, unknown>;
+          const currentPeriodEnd = typeof subData.current_period_end === 'number'
+            ? new Date(subData.current_period_end * 1000).toISOString()
+            : null;
+
           await supabase
             .from('profiles')
             .update({
               active: subscription.status === 'active',
-              current_period_end: subscription.current_period_end
-                ? new Date(subscription.current_period_end * 1000).toISOString()
-                : null,
+              current_period_end: currentPeriodEnd,
             })
             .eq('id', userId);
 
@@ -254,15 +260,19 @@ export async function POST(req: Request) {
           limit: plan.monthly_limit,
         });
 
+        // Calculate current_period_end
+        const subData = subscription as unknown as Record<string, unknown>;
+        const currentPeriodEnd = typeof subData.current_period_end === 'number'
+          ? new Date(subData.current_period_end * 1000).toISOString()
+          : null;
+
         // Update profile with new plan
         const { error: updateError } = await supabase
           .from('profiles')
           .update({
             plan_id: plan.plan_id,
             active: subscription.status === 'active',
-            current_period_end: subscription.current_period_end
-              ? new Date(subscription.current_period_end * 1000).toISOString()
-              : null,
+            current_period_end: currentPeriodEnd,
           })
           .eq('id', userId);
 
