@@ -42,14 +42,14 @@ export default async function PricingPage() {
   const currencySymbol = isPl ? 'zł' : '$';
 
   return (
-    <div className="min-h-screen bg-background py-12 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-7xl mx-auto">
+    <div className="min-h-screen bg-background py-8 sm:py-12">
+      <div className="container mx-auto px-4">
         {/* Header */}
-        <div className="text-center mb-12">
-          <h1 className="text-4xl font-bold tracking-tight mb-4">
+        <div className="text-center mb-8 sm:mb-12">
+          <h1 className="text-3xl sm:text-4xl font-bold tracking-tight mb-4">
             {isPl ? 'Wybierz swój plan' : 'Choose Your Plan'}
           </h1>
-          <p className="text-lg text-muted-foreground">
+          <p className="text-base sm:text-lg text-muted-foreground">
             {isPl
               ? 'Wybierz idealny plan dla swoich potrzeb. Zmień lub anuluj w każdej chwili.'
               : 'Select the perfect plan for your needs. Upgrade or downgrade anytime.'}
@@ -59,8 +59,8 @@ export default async function PricingPage() {
           </p>
         </div>
 
-        {/* Plans Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-5xl mx-auto">
+        {/* Plans Grid - Mobile: 1 column, Desktop: 3 columns */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-6xl mx-auto">
           {plans.map((plan) => {
             const isPopular = plan.name.toLowerCase() === 'pro';
             const price = isPl ? plan.price_pln : plan.price_usd;
@@ -155,11 +155,7 @@ export default async function PricingPage() {
                   <button
                     type="submit"
                     disabled={!isAvailable}
-                    className={`w-full py-3 px-6 rounded-md font-medium transition-colors ${
-                      isPopular
-                        ? 'bg-foreground text-background hover:bg-foreground/90'
-                        : 'bg-secondary text-foreground hover:bg-secondary/80'
-                    } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    className="bg-primary text-primary-foreground w-full py-3 rounded-lg hover:bg-primary/80 transition disabled:opacity-50 disabled:cursor-not-allowed font-medium"
                   >
                     {isAvailable
                       ? isPl

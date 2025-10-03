@@ -122,14 +122,16 @@ export default function DashboardPage() {
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="max-w-4xl mx-auto p-6 space-y-6">
+      <div className="container mx-auto px-4 py-6 sm:py-8 max-w-4xl">
         {/* Header */}
-        <div className="space-y-2">
-          <h1 className="text-3xl font-bold tracking-tight">Dashboard</h1>
-          <p className="text-muted-foreground">
+        <div className="space-y-2 mb-6">
+          <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">Dashboard</h1>
+          <p className="text-sm sm:text-base text-muted-foreground">
             Welcome back, {profile.email}
           </p>
         </div>
+
+        <div className="space-y-6">
 
         {/* Profile Missing Warning */}
         {profile.profileMissing && (
@@ -338,6 +340,7 @@ export default function DashboardPage() {
                 : 'Upgrade your plan to continue generating'}
             </p>
           )}
+        </div>
         </div>
       </div>
     </div>

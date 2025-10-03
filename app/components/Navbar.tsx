@@ -49,7 +49,7 @@ export default function Navbar() {
           {/* Logo / Brand */}
           <div className="flex items-center gap-8">
             <Link href="/" className="text-xl font-bold">
-              WrapperSaaS
+              LUVO
             </Link>
 
             {/* Navigation Links */}
