@@ -7,7 +7,8 @@ type PlanData = {
   monthly_limit: number;
   price_usd: number;
   price_pln: number;
-  stripe_price_id: string;
+  stripe_price_id_pln: string | null;
+  stripe_price_id_usd: string | null;
 } | null;
 
 type ProfileData = {
@@ -49,7 +50,6 @@ export async function GET() {
     console.log('[/api/me] Authenticated user:', user.id, user.email);
 
     // Query profiles with plan JOIN through plan_id → plans.plan_id
-    // Using plans(...) without !plan_id returns a single object (not array)
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select(`
@@ -66,7 +66,8 @@ export async function GET() {
           monthly_limit,
           price_usd,
           price_pln,
-          stripe_price_id
+          stripe_price_id_pln,
+          stripe_price_id_usd
         )
       `)
       .eq('id', user.id)
@@ -98,7 +99,8 @@ export async function GET() {
         current_period_end: null,
         plan_price_usd: null,
         plan_price_pln: null,
-        stripe_price_id: null,
+        stripe_price_id_pln: null,
+        stripe_price_id_usd: null,
         profileMissing: true, // Flag to indicate profile needs setup
       }, { status: 200 });
     }
@@ -111,7 +113,7 @@ export async function GET() {
       active: profile.active,
     });
 
-    // Format response - profile.plans is now correctly typed as object (not array)
+    // Format response - profile.plans is correctly typed as object (not array)
     const response = {
       id: profile.id,
       email: profile.email || user.email || 'No email provided',
@@ -122,7 +124,8 @@ export async function GET() {
       current_period_end: profile.current_period_end,
       plan_price_usd: profile.plans?.price_usd || null,
       plan_price_pln: profile.plans?.price_pln || null,
-      stripe_price_id: profile.plans?.stripe_price_id || null,
+      stripe_price_id_pln: profile.plans?.stripe_price_id_pln || null,
+      stripe_price_id_usd: profile.plans?.stripe_price_id_usd || null,
       profileMissing: false,
     };
 

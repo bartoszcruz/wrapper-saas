@@ -332,6 +332,60 @@ export async function POST(req: Request) {
         break;
       }
 
+      case 'invoice.payment_succeeded': {
+        const invoice = event.data.object as Stripe.Invoice;
+        const invoiceData = invoice as unknown as Record<string, unknown>;
+
+        console.log('[Webhook] Invoice payment succeeded:', {
+          invoiceId: invoice.id,
+          subscriptionId: invoiceData.subscription,
+          periodEnd: invoiceData.period_end,
+        });
+
+        // Only process if this is a subscription invoice
+        if (!invoiceData.subscription) {
+          console.log('[Webhook] Non-subscription invoice, skipping');
+          break;
+        }
+
+        // Find user by stripe_subscription_id
+        const { data: profile, error: profileError } = await supabase
+          .from('profiles')
+          .select('id')
+          .eq('stripe_subscription_id', invoiceData.subscription as string)
+          .single();
+
+        if (profileError || !profile) {
+          console.error('[Webhook] Profile not found for subscription:', invoiceData.subscription);
+          break;
+        }
+
+        const userId = profile.id;
+
+        // Reset usage counter for new billing period
+        const updateData: Record<string, unknown> = {
+          plan_used: 0,
+        };
+
+        // Update current_period_end if available in invoice
+        if (typeof invoiceData.period_end === 'number') {
+          updateData.current_period_end = new Date(invoiceData.period_end * 1000).toISOString();
+        }
+
+        const { error: updateError } = await supabase
+          .from('profiles')
+          .update(updateData)
+          .eq('id', userId);
+
+        if (updateError) {
+          console.error('[Webhook] Error resetting usage:', updateError);
+        } else {
+          console.log('✅ Usage reset for new period:', userId);
+        }
+
+        break;
+      }
+
       default:
         console.log('⚠️ Unhandled event type:', event.type);
     }
