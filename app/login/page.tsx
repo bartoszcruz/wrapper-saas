@@ -3,7 +3,7 @@
 import { useState, FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { supabase } from '@/lib/supabase';
+import { createSupabaseBrowserClient } from '@/lib/supabase-client';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -18,6 +18,8 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
+      const supabase = createSupabaseBrowserClient();
+
       const { data, error: signInError } = await supabase.auth.signInWithPassword({
         email,
         password,
@@ -29,12 +31,17 @@ export default function LoginPage() {
         return;
       }
 
-      if (data.user) {
+      if (data.session) {
+        // Session is automatically stored in cookies by @supabase/ssr
+        // Force router to refresh and recognize the new session
         router.push('/dashboard');
         router.refresh();
+      } else {
+        setError('Login failed: No session created');
+        setLoading(false);
       }
     } catch (err) {
-      console.error(err); // 👈 teraz err jest użyty
+      console.error('Login error:', err);
       setError('An unexpected error occurred');
       setLoading(false);
     }

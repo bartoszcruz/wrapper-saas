@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter, usePathname } from 'next/navigation';
-import { supabase } from '@/lib/supabase';
+import { createSupabaseBrowserClient } from '@/lib/supabase-client';
 import type { User } from '@supabase/supabase-js';
 
 export default function Navbar() {
@@ -11,6 +11,7 @@ export default function Navbar() {
   const pathname = usePathname();
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const supabase = createSupabaseBrowserClient();
 
   useEffect(() => {
     // Get initial session
@@ -30,7 +31,7 @@ export default function Navbar() {
     return () => {
       subscription.unsubscribe();
     };
-  }, []);
+  }, [supabase]);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();

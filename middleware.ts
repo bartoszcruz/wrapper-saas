@@ -1,45 +1,82 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { createServerClient } from '@supabase/ssr';
 
 export async function middleware(request: NextRequest) {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+  const response = NextResponse.next();
 
-  // Get the token from cookies
-  const token = request.cookies.get('sb-access-token')?.value ||
-                request.cookies.get('sb-elqquzizoizzundsujoa-auth-token')?.value;
+  // 1. Handle locale detection (before auth check)
+  const localeCookie = request.cookies.get('locale')?.value;
 
-  // If no token, redirect to login
-  if (!token) {
-    const url = request.nextUrl.clone();
-    url.pathname = '/login';
-    return NextResponse.redirect(url);
+  if (!localeCookie) {
+    // Detect locale from headers
+    const country = request.headers.get('x-vercel-ip-country');
+    const acceptLanguage = request.headers.get('accept-language') || '';
+
+    let detectedLocale = 'en'; // default
+
+    if (country === 'PL' || acceptLanguage.toLowerCase().includes('pl')) {
+      detectedLocale = 'pl';
+    }
+
+    // Set locale cookie (1 year expiry)
+    response.cookies.set('locale', detectedLocale, {
+      maxAge: 60 * 60 * 24 * 365, // 1 year
+      path: '/',
+      sameSite: 'lax',
+    });
+
+    console.log('[Middleware] Locale detected and set:', detectedLocale);
   }
 
-  try {
-    // Create Supabase client
-    const supabase = createClient(supabaseUrl, supabaseAnonKey);
+  // 2. Auth check for protected routes (dashboard)
+  const pathname = request.nextUrl.pathname;
 
-    // Verify the session
-    const { data: { user }, error } = await supabase.auth.getUser(token);
+  if (pathname.startsWith('/dashboard')) {
+    const supabase = createServerClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+      {
+        cookies: {
+          get(name: string) {
+            return request.cookies.get(name)?.value;
+          },
+          set(name: string, value: string, options) {
+            response.cookies.set({
+              name,
+              value,
+              ...options,
+            });
+          },
+          remove(name: string, options) {
+            response.cookies.set({
+              name,
+              value: '',
+              ...options,
+            });
+          },
+        },
+      }
+    );
 
+    // Verify user session
+    const { data: { user }, error } = await supabase.auth.getUser();
+
+    // If no user or error, redirect to login
     if (error || !user) {
       const url = request.nextUrl.clone();
       url.pathname = '/login';
       return NextResponse.redirect(url);
     }
-
-    // User is authenticated, allow request
-    return NextResponse.next();
-  } catch (error) {
-    // On error, redirect to login
-    const url = request.nextUrl.clone();
-    url.pathname = '/login';
-    return NextResponse.redirect(url);
   }
+
+  // User is authenticated (or not on protected route), allow request
+  return response;
 }
 
 export const config = {
-  matcher: ['/dashboard/:path*'],
+  matcher: [
+    '/dashboard/:path*',
+    '/pricing', // Also run on pricing to set locale
+  ],
 };

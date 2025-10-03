@@ -3,7 +3,7 @@
 import { useState, FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { supabase } from '@/lib/supabase';
+import { createSupabaseBrowserClient } from '@/lib/supabase-client';
 
 export default function SignupPage() {
   const router = useRouter();
@@ -18,6 +18,8 @@ export default function SignupPage() {
     setLoading(true);
 
     try {
+      const supabase = createSupabaseBrowserClient();
+
       const { data, error: signUpError } = await supabase.auth.signUp({
         email,
         password,
@@ -29,12 +31,21 @@ export default function SignupPage() {
         return;
       }
 
-      if (data.user) {
+      if (data.session) {
+        // Session is automatically stored in cookies by @supabase/ssr
+        // Force router to refresh and recognize the new session
         router.push('/dashboard');
         router.refresh();
+      } else if (data.user && !data.session) {
+        // Email confirmation might be required
+        setError('Please check your email to confirm your account before logging in.');
+        setLoading(false);
+      } else {
+        setError('Signup failed: No user created');
+        setLoading(false);
       }
     } catch (err) {
-      console.error(err); // 👈 teraz zmienna użyta
+      console.error('Signup error:', err);
       setError('An unexpected error occurred');
       setLoading(false);
     }
