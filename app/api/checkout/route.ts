@@ -92,7 +92,7 @@ export async function POST(request: Request) {
     const locale = cookieStore.get('locale')?.value || 'en';
     const stripeLocale = locale === 'pl' ? 'pl' : 'auto';
 
-    // 7. Create Stripe Checkout Session
+    // 7. Create Stripe Checkout Session with promotion codes enabled
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [
@@ -107,6 +107,7 @@ export async function POST(request: Request) {
       customer_email: user.email || undefined,
       client_reference_id: user.id, // User ID for webhook processing
       locale: stripeLocale as Stripe.Checkout.SessionCreateParams.Locale,
+      allow_promotion_codes: true, // Enable promotion code field
       metadata: {
         userId: user.id,
         planId: plan.plan_id,
@@ -115,11 +116,10 @@ export async function POST(request: Request) {
       },
     });
 
-    console.log('[/api/checkout] Stripe session created:', {
+    console.log('[checkout] session created with allow_promotion_codes=true', {
       sessionId: session.id,
       plan: plan.name,
       currency,
-      locale: stripeLocale,
     });
 
     // 8. Return redirect to Stripe Checkout
