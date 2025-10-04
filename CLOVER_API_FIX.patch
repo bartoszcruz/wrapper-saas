@@ -1,0 +1,169 @@
+## STRIPE CLOVER API COMPATIBILITY FIX
+## Handles current_period_end at subscription item level (Clover 2025-09-30)
+
+diff --git a/app/api/stripe/webhook/route.ts b/app/api/stripe/webhook/route.ts
+--- a/app/api/stripe/webhook/route.ts
++++ b/app/api/stripe/webhook/route.ts
+
++// Helper function to extract current_period_end from subscription (Clover API compatible)
++async function getCurrentPeriodEnd(subscriptionId: string): Promise<string | null> {
++  try {
++    const subscription = await stripe.subscriptions.retrieve(subscriptionId, {
++      expand: ['items'],
++    });
++
++    const subData = subscription as unknown as Record<string, unknown>;
++
++    // Try direct field first (older API)
++    if (typeof subData.current_period_end === 'number') {
++      console.log('[Webhook] current_period_end from subscription:', subData.current_period_end);
++      return new Date(subData.current_period_end * 1000).toISOString();
++    }
++
++    // Fallback: Clover API - period_end on subscription items
++    const items = subscription.items as unknown as Record<string, unknown>;
++    const itemsData = items.data as unknown[];
++    if (itemsData && itemsData.length > 0) {
++      const firstItem = itemsData[0] as Record<string, unknown>;
++      if (typeof firstItem.current_period_end === 'number') {
++        console.log('[Webhook] current_period_end from subscription.items[0]:', firstItem.current_period_end);
++        return new Date(firstItem.current_period_end * 1000).toISOString();
++      }
++    }
++
++    console.warn('[Webhook] current_period_end not found in subscription or items');
++    return null;
++  } catch (error) {
++    console.error('[Webhook] Error fetching subscription for period_end:', error);
++    return null;
++  }
++}
+
+@@ customer.subscription.created event:
+
+       // Calculate current_period_end from subscription
+-      const subData = subscription as unknown as Record<string, unknown>;
+-      const currentPeriodEnd = typeof subData.current_period_end === 'number'
+-        ? new Date(subData.current_period_end * 1000).toISOString()
+-        : null;
++      // Clover API: current_period_end may be on items, not subscription directly
++      const subData = subscription as unknown as Record<string, unknown>;
++      let currentPeriodEnd: string | null = null;
++
++      // Try direct field (backwards compatibility)
++      if (typeof subData.current_period_end === 'number') {
++        currentPeriodEnd = new Date(subData.current_period_end * 1000).toISOString();
++        console.log('[Webhook] period_end from subscription object:', currentPeriodEnd);
++      } else {
++        // Clover API: check subscription items
++        const items = subscription.items as unknown as Record<string, unknown>;
++        const itemsData = items.data as unknown[];
++        const firstItem = itemsData?.[0] as Record<string, unknown>;
++
++        if (typeof firstItem?.current_period_end === 'number') {
++          currentPeriodEnd = new Date(firstItem.current_period_end * 1000).toISOString();
++          console.log('[Webhook] period_end from subscription.items[0]:', currentPeriodEnd);
++        } else {
++          console.warn('[Webhook] current_period_end not found, will remain null');
++        }
++      }
+
+@@ customer.subscription.updated event:
+
+       // Calculate current_period_end
+-      const subData = subscription as unknown as Record<string, unknown>;
+-      const currentPeriodEnd = typeof subData.current_period_end === 'number'
+-        ? new Date(subData.current_period_end * 1000).toISOString()
+-        : null;
++      // Clover API compatible
++      const subData = subscription as unknown as Record<string, unknown>;
++      let currentPeriodEnd: string | null = null;
++
++      if (typeof subData.current_period_end === 'number') {
++        currentPeriodEnd = new Date(subData.current_period_end * 1000).toISOString();
++      } else {
++        const items = subscription.items as unknown as Record<string, unknown>;
++        const itemsData = items.data as unknown[];
++        const firstItem = itemsData?.[0] as Record<string, unknown>;
++        if (typeof firstItem?.current_period_end === 'number') {
++          currentPeriodEnd = new Date(firstItem.current_period_end * 1000).toISOString();
++          console.log('[Webhook] period_end from items (Clover API)');
++        }
++      }
+
+@@ invoice.payment_succeeded event - ENHANCED:
+
+       case 'invoice.payment_succeeded': {
+         const invoice = event.data.object as Stripe.Invoice;
+         const invoiceData = invoice as unknown as Record<string, unknown>;
+
+-        // Extract subscription ID
++        // Extract subscription ID (Clover: check multiple sources)
+         let subscriptionId = invoiceData.subscription as string | null;
+
+         if (!subscriptionId && invoiceData.lines) {
+           const lines = invoiceData.lines as unknown as Record<string, unknown>;
+           const linesData = lines.data as unknown[];
+           const firstLine = linesData?.[0] as Record<string, unknown>;
+           if (firstLine?.subscription) {
+             subscriptionId = firstLine.subscription as string;
++            console.log('[Webhook] Found subscription in invoice.lines:', subscriptionId);
+           }
+         }
+
++        // Additional fallback: subscription_details (Clover)
++        if (!subscriptionId && invoiceData.subscription_details) {
++          const subDetails = invoiceData.subscription_details as Record<string, unknown>;
++          if (subDetails.subscription_id) {
++            subscriptionId = subDetails.subscription_id as string;
++            console.log('[Webhook] Found subscription in subscription_details:', subscriptionId);
++          }
++        }
+
+         if (!subscriptionId) {
+           console.log('[Webhook] Non-subscription invoice (no subscription ID found), skipping');
+           break;
+         }
+
+-        // Update current_period_end from invoice
+-        let periodEnd: number | null = null;
+-        if (typeof invoiceData.period_end === 'number') {
+-          periodEnd = invoiceData.period_end;
+-        } else if (invoiceData.lines) {
+-          const lines = invoiceData.lines as unknown as Record<string, unknown>;
+-          const linesData = lines.data as unknown[];
+-          const firstLine = linesData?.[0] as Record<string, unknown>;
+-          const period = firstLine?.period as Record<string, unknown>;
+-          if (period?.end && typeof period.end === 'number') {
+-            periodEnd = period.end as number;
+-          }
+-        }
++        // Clover API: Retrieve subscription to get current_period_end from items
++        const currentPeriodEnd = await getCurrentPeriodEnd(subscriptionId);
+
+-        if (periodEnd) {
+-          updateData.current_period_end = new Date(periodEnd * 1000).toISOString();
+-        }
++        if (currentPeriodEnd) {
++          updateData.current_period_end = currentPeriodEnd;
++        }
+
+         updateData.active = true;
+
+         const { error: updateError } = await supabase
+           .from('profiles')
+           .update(updateData)
+           .eq('id', userId);
+
+         if (updateError) {
+           console.error('[Webhook] Error resetting usage:', updateError);
+         } else {
+           console.log('✅ Usage reset for new period:', userId, {
+             plan_used: 0,
+             current_period_end: updateData.current_period_end || 'not updated',
+             active: true,
+           });
+         }
+
+         break;
+       }
