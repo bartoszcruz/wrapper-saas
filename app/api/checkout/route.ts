@@ -21,26 +21,7 @@ export async function POST(request: Request) {
 
     console.log('[/api/checkout] User:', user.id, user.email);
 
-    // 2. Check for existing active subscription and cancel it
-    const { data: existingProfile } = await supabase
-      .from('profiles')
-      .select('stripe_subscription_id, active')
-      .eq('id', user.id)
-      .single();
-
-    if (existingProfile?.stripe_subscription_id && existingProfile.active) {
-      console.log('[Checkout] User has active subscription, cancelling:', existingProfile.stripe_subscription_id);
-
-      try {
-        await stripe.subscriptions.cancel(existingProfile.stripe_subscription_id);
-        console.log('[Checkout] Cancelled old subscription for user', user.id);
-      } catch (cancelError) {
-        console.error('[Checkout] Error cancelling old subscription:', cancelError);
-        // Continue anyway - allow new subscription creation
-      }
-    }
-
-    // 3. Parse FormData
+    // 2. Parse FormData
     const formData = await request.formData();
     const planName = formData.get('plan') as string | null;
     const currency = formData.get('currency') as string | null;
@@ -103,15 +84,71 @@ export async function POST(request: Request) {
 
     console.log('[/api/checkout] Using Stripe Price ID:', stripePriceId, `(${currency})`);
 
-    // 5. Get app URL from env
+    // 5. Check for existing subscription - UPDATE instead of CANCEL+CREATE
+    const { data: existingProfile } = await supabase
+      .from('profiles')
+      .select('stripe_subscription_id, active')
+      .eq('id', user.id)
+      .single();
+
+    if (existingProfile?.stripe_subscription_id && existingProfile.active) {
+      console.log('[Checkout] User has active subscription, updating plan:', existingProfile.stripe_subscription_id);
+
+      try {
+        // Retrieve current subscription to get item ID
+        const currentSubscription = await stripe.subscriptions.retrieve(
+          existingProfile.stripe_subscription_id
+        );
+
+        const currentItemId = currentSubscription.items.data[0]?.id;
+
+        if (!currentItemId) {
+          throw new Error('No subscription item found');
+        }
+
+        // UPDATE subscription with new price (keeps same subscription_id)
+        await stripe.subscriptions.update(existingProfile.stripe_subscription_id, {
+          items: [
+            {
+              id: currentItemId,
+              price: stripePriceId,  // Change to new price
+            },
+          ],
+          proration_behavior: 'create_prorations',  // Stripe calculates proration
+          metadata: {
+            userId: user.id,
+            planId: plan.plan_id,
+            planName: plan.name,
+            currency: currency,
+          },
+        });
+
+        console.log('[Checkout] ✅ Subscription updated with proration:', {
+          subscriptionId: existingProfile.stripe_subscription_id,
+          oldPrice: currentSubscription.items.data[0]?.price.id,
+          newPrice: stripePriceId,
+          plan: plan.name,
+        });
+
+        // Redirect to dashboard with success message
+        return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/dashboard?upgraded=true`, 303);
+
+      } catch (updateError) {
+        console.error('[Checkout] Error updating subscription:', updateError);
+        return NextResponse.json(
+          { error: 'Failed to update subscription' },
+          { status: 500 }
+        );
+      }
+    }
+
+    // 6. No existing subscription - create new via Checkout
     const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
 
-    // 6. Get locale from cookies for Stripe Checkout UI
     const cookieStore = await cookies();
     const locale = cookieStore.get('locale')?.value || 'en';
     const stripeLocale = locale === 'pl' ? 'pl' : 'auto';
 
-    // 7. Create Stripe Checkout Session with promotion codes enabled
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [
@@ -124,9 +161,9 @@ export async function POST(request: Request) {
       success_url: `${appUrl}/dashboard?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${appUrl}/pricing`,
       customer_email: user.email || undefined,
-      client_reference_id: user.id, // User ID for webhook processing
+      client_reference_id: user.id,
       locale: stripeLocale as Stripe.Checkout.SessionCreateParams.Locale,
-      allow_promotion_codes: true, // Enable promotion code field
+      allow_promotion_codes: true,
       metadata: {
         userId: user.id,
         planId: plan.plan_id,
@@ -141,7 +178,6 @@ export async function POST(request: Request) {
       currency,
     });
 
-    // 8. Return redirect to Stripe Checkout
     if (!session.url) {
       console.error('[/api/checkout] No checkout URL returned from Stripe');
       return NextResponse.json(
@@ -150,7 +186,6 @@ export async function POST(request: Request) {
       );
     }
 
-    // Redirect to Stripe Checkout (303 for POST form)
     return NextResponse.redirect(session.url, 303);
 
   } catch (error) {
