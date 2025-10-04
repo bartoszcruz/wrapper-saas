@@ -20,6 +20,11 @@ type ProfileData = {
   plan_used: number;
   active: boolean;
   current_period_end: string | null;
+  cancel_at_period_end: boolean;
+  pending_plan_change: boolean;
+  target_plan_id: string | null;
+  last_checkout_at: string | null;
+  subscription_status: string;
   plans: PlanData;
 };
 

@@ -7,7 +7,6 @@ import {
   logWebhookEvent,
   logAlert,
   updateProfileAtomic,
-  clearPendingPlanChange,
   isValidSubscriptionStatus,
 } from '@/lib/webhook-helpers';
 
