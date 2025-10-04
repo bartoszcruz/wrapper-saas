@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
+import { toast } from 'sonner';
 
 interface UserProfile {
   id: string;
@@ -68,11 +69,32 @@ export default function DashboardPage() {
     fetchProfile();
   }, [fetchProfile]);
 
+  // Auto-refresh after Stripe checkout success
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const sessionId = params.get('session_id');
+
+    if (sessionId) {
+      console.log('[Dashboard] Stripe session detected, waiting for webhook...');
+      toast.info('Processing your payment...', { duration: 3000 });
+
+      // Wait 3 seconds for webhook to process, then refresh profile
+      const timer = setTimeout(() => {
+        fetchProfile();
+        // Remove session_id from URL
+        window.history.replaceState({}, '', '/dashboard');
+        toast.success('Subscription activated!');
+      }, 3000);
+
+      return () => clearTimeout(timer);
+    }
+  }, [fetchProfile]);
+
   const handleGenerate = async () => {
     setGenerating(true);
     // TODO: Call /api/generate endpoint
     setTimeout(() => {
-      alert('Generate functionality coming soon!');
+      toast.info('Generate functionality coming soon!');
       setGenerating(false);
     }, 1000);
   };

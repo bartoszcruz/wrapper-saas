@@ -27,15 +27,26 @@ export async function POST(req: Request) {
 
     console.log('[Webhook] Event received:', event.type, event.id);
 
-    // Log FULL webhook event to database for complete audit trail
-    // Table schema: id (int8 PK), event_id (text), type (text), raw (jsonb), created_at (timestamptz)
+    // Log FULL webhook event to database for complete audit trail (idempotent)
+    // Table schema: id (int8 PK), event_id (text UNIQUE), type (text), raw (jsonb), created_at (timestamptz)
     try {
-      await supabase.from('webhook_events').insert({
-        event_id: event.id,
-        type: event.type,
-        raw: event,  // ✅ Full event object (not just data.object)
-      });
-      console.log('[Webhook] Full event logged to database');
+      // Check if event already logged (idempotency)
+      const { data: existing } = await supabase
+        .from('webhook_events')
+        .select('event_id')
+        .eq('event_id', event.id)
+        .single();
+
+      if (!existing) {
+        await supabase.from('webhook_events').insert({
+          event_id: event.id,
+          type: event.type,
+          raw: event,
+        });
+        console.log('[Webhook] Full event logged to database');
+      } else {
+        console.log('[Webhook] Event already logged (duplicate), skipping');
+      }
     } catch (logError) {
       console.error('[Webhook] Failed to log event to database:', logError);
       // Continue processing even if logging fails

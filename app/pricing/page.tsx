@@ -37,6 +37,15 @@ export default async function PricingPage() {
     );
   }
 
+  // Get user's current plan
+  const { data: currentProfile } = await supabase
+    .from('profiles')
+    .select('plan_id, active')
+    .eq('id', user.id)
+    .single();
+
+  console.log('[Pricing] User current plan:', currentProfile?.plan_id);
+
   // Currency settings
   const currency = isPl ? 'PLN' : 'USD';
   const currencySymbol = isPl ? 'zł' : '$';
@@ -66,6 +75,7 @@ export default async function PricingPage() {
             const price = isPl ? plan.price_pln : plan.price_usd;
             const priceId = isPl ? plan.stripe_price_id_pln : plan.stripe_price_id_usd;
             const isAvailable = !!priceId;
+            const isCurrentPlan = currentProfile?.plan_id === plan.plan_id;
 
             // Capitalize plan name
             const displayName = plan.name.charAt(0).toUpperCase() + plan.name.slice(1);
@@ -79,8 +89,17 @@ export default async function PricingPage() {
                     : 'border-border'
                 }`}
               >
+                {/* Current Plan Badge */}
+                {isCurrentPlan && (
+                  <div className="absolute -top-4 left-4">
+                    <span className="bg-green-500 text-white px-3 py-1 rounded-full text-xs font-medium">
+                      {isPl ? 'Aktualny plan' : 'Current Plan'}
+                    </span>
+                  </div>
+                )}
+
                 {/* Popular Badge */}
-                {isPopular && (
+                {isPopular && !isCurrentPlan && (
                   <div className="absolute -top-4 left-1/2 transform -translate-x-1/2">
                     <span className="bg-foreground text-background px-4 py-1 rounded-full text-sm font-medium">
                       {isPl ? 'Najpopularniejszy' : 'Most Popular'}
@@ -154,10 +173,14 @@ export default async function PricingPage() {
                   <input type="hidden" name="currency" value={currency} />
                   <button
                     type="submit"
-                    disabled={!isAvailable}
+                    disabled={!isAvailable || isCurrentPlan}
                     className="bg-primary text-primary-foreground w-full py-3 rounded-lg hover:bg-primary/80 transition disabled:opacity-50 disabled:cursor-not-allowed font-medium"
                   >
-                    {isAvailable
+                    {isCurrentPlan
+                      ? isPl
+                        ? 'Aktywny'
+                        : 'Active'
+                      : isAvailable
                       ? isPl
                         ? 'Subskrybuj'
                         : 'Subscribe'
