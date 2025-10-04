@@ -54,7 +54,7 @@ export async function GET() {
 
     console.log('[/api/me] Authenticated user:', user.id, user.email);
 
-    // Query profiles with plan JOIN through plan_id → plans.plan_id
+    // Query profiles with LEFT JOIN to plans (allows null plan_id)
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select(`
@@ -70,7 +70,7 @@ export async function GET() {
         pending_plan_change,
         target_plan_id,
         subscription_status,
-        plans!plan_id (
+        plans:plan_id (
           name,
           monthly_limit,
           price_usd,
@@ -128,24 +128,25 @@ export async function GET() {
     });
 
     // Format response - profile.plans is correctly typed as object (not array)
+    // Note: plans will be null if user has no plan_id (LEFT JOIN)
     const response = {
       id: profile.id,
       email: profile.email || user.email || 'No email provided',
       plan: profile.plans?.name || null,
       plan_limit: profile.plans?.monthly_limit || 0,
-      plan_used: profile.plan_used || 0,
-      active: profile.active || false,
-      current_period_end: profile.current_period_end,
-      cancel_at_period_end: profile.cancel_at_period_end || false,
-      pending_plan_change: profile.pending_plan_change || false,
-      target_plan_id: profile.target_plan_id || null,
-      subscription_status: profile.subscription_status || 'inactive',
-      plan_price_usd: profile.plans?.price_usd || null,
-      plan_price_pln: profile.plans?.price_pln || null,
-      stripe_price_id_pln: profile.plans?.stripe_price_id_pln || null,
-      stripe_price_id_usd: profile.plans?.stripe_price_id_usd || null,
-      stripe_customer_id: profile.stripe_customer_id || null,
-      profileMissing: false,
+      plan_used: profile.plan_used ?? 0,
+      active: profile.active ?? false,
+      current_period_end: profile.current_period_end ?? null,
+      cancel_at_period_end: profile.cancel_at_period_end ?? false,
+      pending_plan_change: profile.pending_plan_change ?? false,
+      target_plan_id: profile.target_plan_id ?? null,
+      subscription_status: profile.subscription_status ?? 'inactive',
+      plan_price_usd: profile.plans?.price_usd ?? null,
+      plan_price_pln: profile.plans?.price_pln ?? null,
+      stripe_price_id_pln: profile.plans?.stripe_price_id_pln ?? null,
+      stripe_price_id_usd: profile.plans?.stripe_price_id_usd ?? null,
+      stripe_customer_id: profile.stripe_customer_id ?? null,
+      profileMissing: false, // Profile exists in DB (only true when row not found)
     };
 
     return NextResponse.json(response, { status: 200 });
