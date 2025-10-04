@@ -201,26 +201,26 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Plan Card */}
+        {/* Plan Card - only show if active */}
+        {profile.active && hasPlan && (
         <div className="bg-card border border-border rounded-lg p-6 space-y-4">
           <div className="flex items-center justify-between">
             <div>
               <h2 className="text-xl font-semibold">Current Plan</h2>
               <p className="text-muted-foreground text-sm mt-1">
                 {planName}
-                {!hasPlan && ' (Not configured)'}
               </p>
             </div>
             <button
               onClick={() => router.push('/pricing')}
               className="px-4 py-2 text-sm font-medium border border-border rounded-md hover:bg-accent transition-colors"
             >
-              {hasPlan ? 'Upgrade' : 'Choose Plan'}
+              Upgrade
             </button>
           </div>
 
-          {/* Usage Stats - only show if plan exists */}
-          {hasPlan && (
+          {/* Usage Stats */}
+          {(
             <div className="space-y-2">
               <div className="flex items-center justify-between text-sm">
                 <span className="text-muted-foreground">Monthly usage</span>
@@ -261,6 +261,7 @@ export default function DashboardPage() {
             </p>
           )}
         </div>
+        )}
 
         {/* Subscription Details */}
         {hasPlan && profile.active && (

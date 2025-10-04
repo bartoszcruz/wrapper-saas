@@ -396,35 +396,30 @@ export async function POST(req: Request) {
           // User cancelled but still has paid access until period end
           console.log('[Webhook] Subscription cancelled, keeping access until:', currentPeriodEnd.toISOString());
 
-          // Keep current plan, mark as ending soon
+          // Set plan_id to null (user will see "No Plan" in UI) but keep period_end
           await supabase
             .from('profiles')
             .update({
-              active: false, // Mark as non-renewing (won't auto-bill)
-              current_period_end: currentPeriodEnd.toISOString(),
+              plan_id: null, // Clear plan (UI shows "No active subscription")
+              active: false, // Mark as non-renewing
+              current_period_end: currentPeriodEnd.toISOString(), // Keep for grace period tracking
             })
             .eq('id', profile.id);
 
-          console.log('✅ Subscription will end at period:', profile.id, currentPeriodEnd);
+          console.log('✅ Subscription cancelled (grace period until):', profile.id, currentPeriodEnd);
         } else {
-          // Period has ended, now safe to downgrade
-          const { data: basicPlan } = await supabase
-            .from('plans')
-            .select('plan_id')
-            .ilike('name', 'basic')
-            .single();
-
+          // Period has ended, clear plan completely
           await supabase
             .from('profiles')
             .update({
-              plan_id: basicPlan?.plan_id || null,
+              plan_id: null, // Clear plan (UI shows "No Plan")
               active: false,
               current_period_end: null,
-              plan_used: 0, // ✅ Reset usage when downgrading
+              plan_used: 0, // Reset usage
             })
             .eq('id', profile.id);
 
-          console.log('✅ User downgraded to basic (period ended):', profile.id);
+          console.log('✅ Subscription ended, plan cleared:', profile.id);
         }
 
         break;
@@ -597,16 +592,19 @@ export async function POST(req: Request) {
           break;
         }
 
-        // Final attempt failed, deactivate
+        // Final attempt failed, deactivate and clear plan
         const { error: updateError } = await supabase
           .from('profiles')
-          .update({ active: false })
+          .update({
+            active: false,
+            plan_id: null, // Clear plan (UI shows "No active subscription")
+          })
           .eq('id', userId);
 
         if (updateError) {
           console.error('[Webhook] Error deactivating subscription:', updateError);
         } else {
-          console.log('⚠️ Payment failed (final attempt), subscription deactivated:', userId);
+          console.log('⚠️ Payment failed (final attempt), subscription deactivated and plan cleared:', userId);
         }
 
         break;
