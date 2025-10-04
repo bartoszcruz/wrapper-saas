@@ -47,7 +47,7 @@ export async function POST(request: Request) {
     // 3. Fetch plan from Supabase (case-insensitive)
     const { data: plan, error: planError } = await supabase
       .from('plans')
-      .select('plan_id, name, stripe_price_id_pln, stripe_price_id_usd, price_pln, price_usd')
+      .select('plan_id, name, stripe_price_id_pln, stripe_price_id_usd, price_pln, price_usd, monthly_limit')
       .ilike('name', planName)
       .single();
 
@@ -84,109 +84,229 @@ export async function POST(request: Request) {
 
     console.log('[/api/checkout] Using Stripe Price ID:', stripePriceId, `(${currency})`);
 
-    // 5. Check for existing subscription - UPDATE instead of CANCEL+CREATE
+    // 5. Get user profile with rate limiting check
     const { data: existingProfile } = await supabase
       .from('profiles')
-      .select('stripe_subscription_id, active')
+      .select('stripe_customer_id, stripe_subscription_id, active, plan_id, last_checkout_at, pending_plan_change')
       .eq('id', user.id)
       .single();
 
-    if (existingProfile?.stripe_subscription_id && existingProfile.active) {
-      console.log('[Checkout] User has active subscription, updating plan:', existingProfile.stripe_subscription_id);
+    // 6. RATE LIMITING: Check if last checkout was less than 60 seconds ago
+    if (existingProfile?.last_checkout_at) {
+      const lastCheckoutTime = new Date(existingProfile.last_checkout_at).getTime();
+      const now = Date.now();
+      const timeSinceLastCheckout = now - lastCheckoutTime;
+
+      if (timeSinceLastCheckout < 60000) { // 60 seconds
+        const remainingSeconds = Math.ceil((60000 - timeSinceLastCheckout) / 1000);
+        console.warn('[/api/checkout] Rate limit hit:', user.id, `Wait ${remainingSeconds}s`);
+        return NextResponse.json(
+          { error: `Please wait ${remainingSeconds} seconds before trying again` },
+          { status: 429 }
+        );
+      }
+    }
+
+    // 7. Check if there's already a pending plan change
+    if (existingProfile?.pending_plan_change) {
+      console.warn('[/api/checkout] Pending plan change already in progress:', user.id);
+      return NextResponse.json(
+        { error: 'A plan change is already in progress. Please wait for it to complete.' },
+        { status: 409 }
+      );
+    }
+
+    // 8. Check if user is trying to select the same plan they already have
+    if (existingProfile?.plan_id === plan.plan_id && existingProfile?.active) {
+      console.log('[/api/checkout] User already has this plan:', plan.name);
+      return NextResponse.json(
+        { error: 'You already have this plan' },
+        { status: 400 }
+      );
+    }
+
+    // 9. FORK: Existing subscription (upgrade/downgrade) vs New subscription
+    const hasActiveSubscription = existingProfile?.stripe_subscription_id && existingProfile?.active;
+
+    if (hasActiveSubscription) {
+      // ========================================
+      // UPGRADE/DOWNGRADE: Use subscriptions.update
+      // ========================================
+      console.log('[/api/checkout] User has active subscription, using subscriptions.update');
 
       try {
-        // Retrieve current subscription to get item ID
-        const currentSubscription = await stripe.subscriptions.retrieve(
+        // Verify subscription exists and is active in Stripe
+        const subscription = await stripe.subscriptions.retrieve(
           existingProfile.stripe_subscription_id
         );
 
-        const currentItemId = currentSubscription.items.data[0]?.id;
-
-        if (!currentItemId) {
-          throw new Error('No subscription item found');
+        if (subscription.status !== 'active' && subscription.status !== 'trialing') {
+          console.error('[/api/checkout] Subscription not active in Stripe:', subscription.status);
+          return NextResponse.json(
+            { error: `Subscription is ${subscription.status}. Please contact support.` },
+            { status: 400 }
+          );
         }
 
-        // UPDATE subscription with new price (keeps same subscription_id)
-        await stripe.subscriptions.update(existingProfile.stripe_subscription_id, {
-          items: [
-            {
-              id: currentItemId,
-              price: stripePriceId,  // Change to new price
-            },
-          ],
-          proration_behavior: 'create_prorations',  // Stripe calculates proration
-          metadata: {
-            userId: user.id,
-            planId: plan.plan_id,
-            planName: plan.name,
-            currency: currency,
-          },
-        });
+        // Get subscription item ID (first item)
+        const subscriptionItemId = subscription.items.data[0]?.id;
 
-        console.log('[Checkout] ✅ Subscription updated with proration:', {
-          subscriptionId: existingProfile.stripe_subscription_id,
-          oldPrice: currentSubscription.items.data[0]?.price.id,
+        if (!subscriptionItemId) {
+          console.error('[/api/checkout] No subscription item found');
+          return NextResponse.json(
+            { error: 'Invalid subscription structure. Please contact support.' },
+            { status: 500 }
+          );
+        }
+
+        console.log('[/api/checkout] Updating subscription:', {
+          subscriptionId: subscription.id,
+          itemId: subscriptionItemId,
+          oldPrice: subscription.items.data[0]?.price.id,
           newPrice: stripePriceId,
-          plan: plan.name,
         });
 
-        // Redirect to dashboard with success message
-        return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/dashboard?upgraded=true`, 303);
+        // Update subscription with new price
+        const updatedSubscription = await stripe.subscriptions.update(
+          existingProfile.stripe_subscription_id,
+          {
+            items: [
+              {
+                id: subscriptionItemId,
+                price: stripePriceId, // New price
+              },
+            ],
+            proration_behavior: 'create_prorations', // Calculate proration
+            billing_cycle_anchor: 'unchanged', // Keep same billing cycle
+            metadata: {
+              userId: user.id,
+              planId: plan.plan_id,
+              planName: plan.name,
+              currency: currency,
+              previousPlanId: existingProfile.plan_id || 'unknown',
+            },
+          }
+        );
 
-      } catch (updateError) {
-        console.error('[Checkout] Error updating subscription:', updateError);
+        console.log('[/api/checkout] ✅ Subscription updated:', {
+          subscriptionId: updatedSubscription.id,
+          newPrice: stripePriceId,
+          status: updatedSubscription.status,
+        });
+
+        // Set pending state (webhook will clear it)
+        const { error: updateError } = await supabase
+          .from('profiles')
+          .update({
+            pending_plan_change: true,
+            target_plan_id: plan.plan_id,
+            last_checkout_at: new Date().toISOString(),
+          })
+          .eq('id', user.id);
+
+        if (updateError) {
+          console.error('[/api/checkout] Failed to set pending state:', updateError);
+        } else {
+          console.log('[/api/checkout] Set pending_plan_change=true for user:', user.id);
+        }
+
+        // Return success (no redirect, stay on dashboard)
+        // Dashboard will poll and detect pending_plan_change
+        const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+        return NextResponse.redirect(`${appUrl}/dashboard?plan_change=pending`, 303);
+
+      } catch (error) {
+        console.error('[/api/checkout] Error updating subscription:', error);
+
+        if (error instanceof Stripe.errors.StripeError) {
+          return NextResponse.json(
+            { error: `Stripe error: ${error.message}` },
+            { status: 500 }
+          );
+        }
+
         return NextResponse.json(
           { error: 'Failed to update subscription' },
           { status: 500 }
         );
       }
-    }
 
-    // 6. No existing subscription - create new via Checkout
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+    } else {
+      // ========================================
+      // NEW SUBSCRIPTION: Use Checkout Session
+      // ========================================
+      console.log('[/api/checkout] Creating new subscription via Checkout Session');
 
-    const cookieStore = await cookies();
-    const locale = cookieStore.get('locale')?.value || 'en';
-    const stripeLocale = locale === 'pl' ? 'pl' : 'auto';
+      const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+      const cookieStore = await cookies();
+      const locale = cookieStore.get('locale')?.value || 'en';
+      const stripeLocale = locale === 'pl' ? 'pl' : 'auto';
 
-    const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      line_items: [
-        {
-          price: stripePriceId,
-          quantity: 1,
+      const sessionParams: Stripe.Checkout.SessionCreateParams = {
+        payment_method_types: ['card'],
+        line_items: [
+          {
+            price: stripePriceId,
+            quantity: 1,
+          },
+        ],
+        mode: 'subscription',
+        success_url: `${appUrl}/dashboard?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${appUrl}/pricing`,
+        client_reference_id: user.id,
+        locale: stripeLocale as Stripe.Checkout.SessionCreateParams.Locale,
+        allow_promotion_codes: true,
+        metadata: {
+          userId: user.id,
+          planId: plan.plan_id,
+          planName: plan.name,
+          currency: currency,
         },
-      ],
-      mode: 'subscription',
-      success_url: `${appUrl}/dashboard?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${appUrl}/pricing`,
-      customer_email: user.email || undefined,
-      client_reference_id: user.id,
-      locale: stripeLocale as Stripe.Checkout.SessionCreateParams.Locale,
-      allow_promotion_codes: true,
-      metadata: {
-        userId: user.id,
-        planId: plan.plan_id,
-        planName: plan.name,
-        currency: currency,
-      },
-    });
+      };
 
-    console.log('[checkout] session created with allow_promotion_codes=true', {
-      sessionId: session.id,
-      plan: plan.name,
-      currency,
-    });
+      // If user has existing customer ID, attach it
+      if (existingProfile?.stripe_customer_id) {
+        sessionParams.customer = existingProfile.stripe_customer_id;
+      } else {
+        sessionParams.customer_email = user.email || undefined;
+      }
 
-    if (!session.url) {
-      console.error('[/api/checkout] No checkout URL returned from Stripe');
-      return NextResponse.json(
-        { error: 'Failed to create checkout session' },
-        { status: 500 }
-      );
+      // Create Checkout Session
+      const session = await stripe.checkout.sessions.create(sessionParams);
+
+      console.log('[/api/checkout] Checkout session created:', {
+        sessionId: session.id,
+        plan: plan.name,
+        currency,
+      });
+
+      if (!session.url) {
+        console.error('[/api/checkout] No checkout URL returned from Stripe');
+        return NextResponse.json(
+          { error: 'Failed to create checkout session' },
+          { status: 500 }
+        );
+      }
+
+      // Set pending state
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({
+          pending_plan_change: true,
+          target_plan_id: plan.plan_id,
+          last_checkout_at: new Date().toISOString(),
+        })
+        .eq('id', user.id);
+
+      if (updateError) {
+        console.error('[/api/checkout] Failed to set pending state:', updateError);
+      } else {
+        console.log('[/api/checkout] Set pending_plan_change=true for user:', user.id);
+      }
+
+      // Redirect to Stripe Checkout
+      return NextResponse.redirect(session.url, 303);
     }
-
-    return NextResponse.redirect(session.url, 303);
 
   } catch (error) {
     console.error('[/api/checkout] Unexpected error:', error);

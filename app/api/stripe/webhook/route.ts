@@ -2,6 +2,14 @@ import { headers } from 'next/headers';
 import { NextResponse } from 'next/server';
 import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
+import {
+  isDuplicateEvent,
+  logWebhookEvent,
+  logAlert,
+  updateProfileAtomic,
+  clearPendingPlanChange,
+  isValidSubscriptionStatus,
+} from '@/lib/webhook-helpers';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
   apiVersion: '2025-09-30.clover',
@@ -14,7 +22,6 @@ const supabase = createClient(
 );
 
 // Helper: Extract current_period_end from subscription (Clover API compatible)
-// In Clover (2025-09-30), current_period_end moved to subscription items level
 async function getCurrentPeriodEnd(subscriptionId: string): Promise<string | null> {
   try {
     const subscription = await stripe.subscriptions.retrieve(subscriptionId, {
@@ -64,30 +71,19 @@ export async function POST(req: Request) {
 
     console.log('[Webhook] Event received:', event.type, event.id);
 
-    // Log FULL webhook event to database for complete audit trail (idempotent)
-    // Table schema: id (int8 PK), event_id (text UNIQUE), type (text), raw (jsonb), created_at (timestamptz)
-    try {
-      // Check if event already logged (idempotency)
-      const { data: existing } = await supabase
-        .from('webhook_events')
-        .select('event_id')
-        .eq('event_id', event.id)
-        .single();
-
-      if (!existing) {
-        await supabase.from('webhook_events').insert({
-          event_id: event.id,
-          type: event.type,
-          raw: event,
-        });
-        console.log('[Webhook] Full event logged to database');
-      } else {
-        console.log('[Webhook] Event already logged (duplicate), skipping');
-      }
-    } catch (logError) {
-      console.error('[Webhook] Failed to log event to database:', logError);
-      // Continue processing even if logging fails
+    // ✅ IDEMPOTENCY CHECK: Return early if event already processed
+    const duplicate = await isDuplicateEvent(event.id);
+    if (duplicate) {
+      console.log('[Webhook] ⚠️ Duplicate event detected, skipping processing:', event.id);
+      return NextResponse.json({ received: true, duplicate: true }, { status: 200 });
     }
+
+    // Log event to database for audit trail
+    await logWebhookEvent({
+      eventId: event.id,
+      eventType: event.type,
+      payload: event,
+    });
 
     switch (event.type) {
       case 'checkout.session.completed': {
@@ -105,6 +101,12 @@ export async function POST(req: Request) {
 
         if (!userId) {
           console.error('[Webhook] Missing userId in session metadata');
+          await logAlert({
+            type: 'subscription_mismatch',
+            severity: 'warning',
+            message: 'Missing userId in checkout session metadata',
+            metadata: { sessionId: session.id },
+          });
           break;
         }
 
@@ -123,6 +125,12 @@ export async function POST(req: Request) {
 
         if (!priceId) {
           console.error('[Webhook] No price ID found in session line_items');
+          await logAlert({
+            type: 'missing_price_id',
+            severity: 'critical',
+            message: 'No price ID found in checkout session line items',
+            metadata: { sessionId: session.id, userId },
+          });
           break;
         }
 
@@ -136,18 +144,27 @@ export async function POST(req: Request) {
           .single();
 
         if (planError || !plan) {
-          console.error('[Webhook] Plan not found for price_id:', priceId, planError?.message);
-          // Still update customer info even if plan not found
-          await supabase
-            .from('profiles')
-            .update({
+          console.error('[Webhook] ❌ CRITICAL: Plan not found for price_id:', priceId, planError?.message);
+
+          await logAlert({
+            type: 'missing_price_id',
+            severity: 'critical',
+            message: `Plan not found for price_id: ${priceId}. User will have active subscription but no plan in DB.`,
+            metadata: { priceId, userId, sessionId: session.id },
+          });
+
+          // ❌ DO NOT activate subscription without valid plan
+          await updateProfileAtomic({
+            userId,
+            updates: {
               stripe_customer_id: session.customer as string,
               stripe_subscription_id: session.subscription as string,
-              active: true,
-            })
-            .eq('id', userId);
+              active: false, // Don't give access without valid plan
+              pending_plan_change: false,
+            },
+          });
 
-          console.log('[Webhook] Updated customer info without plan');
+          console.log('[Webhook] Updated customer info without plan (active=false)');
           break;
         }
 
@@ -156,29 +173,27 @@ export async function POST(req: Request) {
           limit: plan.monthly_limit,
         });
 
-        // Update profile with plan info
-        // Note: current_period_end will be set by customer.subscription.created event
-        const { error: updateError } = await supabase
-          .from('profiles')
-          .update({
+        // Update profile with plan info and clear pending state
+        await updateProfileAtomic({
+          userId,
+          updates: {
             plan_id: plan.plan_id,
             active: true,
             stripe_customer_id: session.customer as string,
             stripe_subscription_id: session.subscription as string,
-          })
-          .eq('id', userId);
+            subscription_status: 'active',
+            pending_plan_change: false,
+            target_plan_id: null,
+          },
+        });
 
-        if (updateError) {
-          console.error('[Webhook] Error updating profile:', updateError);
-        } else {
-          console.log('✅ Profile updated:', {
-            userId,
-            plan: plan.name,
-            planId: plan.plan_id,
-            limit: plan.monthly_limit,
-            active: true,
-          });
-        }
+        console.log('✅ Profile updated:', {
+          userId,
+          plan: plan.name,
+          planId: plan.plan_id,
+          limit: plan.monthly_limit,
+          active: true,
+        });
 
         break;
       }
@@ -208,6 +223,12 @@ export async function POST(req: Request) {
 
         if (profileError || !profile) {
           console.error('[Webhook] Profile not found for customer:', subscription.customer);
+          await logAlert({
+            type: 'subscription_mismatch',
+            severity: 'warning',
+            message: 'Profile not found for Stripe customer',
+            metadata: { customerId: subscription.customer, subscriptionId: subscription.id },
+          });
           break;
         }
 
@@ -222,6 +243,12 @@ export async function POST(req: Request) {
 
         if (planError || !plan) {
           console.error('[Webhook] Plan not found for price_id:', priceId);
+          await logAlert({
+            type: 'missing_price_id',
+            severity: 'critical',
+            message: `Plan not found for price_id in subscription.created: ${priceId}`,
+            metadata: { priceId, userId, subscriptionId: subscription.id },
+          });
           break;
         }
 
@@ -230,30 +257,40 @@ export async function POST(req: Request) {
           limit: plan.monthly_limit,
         });
 
+        // Validate subscription status
+        if (!isValidSubscriptionStatus(subscription.status)) {
+          console.warn('[Webhook] Unknown subscription status:', subscription.status);
+          await logAlert({
+            type: 'unknown_status',
+            severity: 'warning',
+            message: `Unknown subscription status: ${subscription.status}`,
+            metadata: { status: subscription.status, subscriptionId: subscription.id },
+          });
+        }
+
         // Calculate current_period_end (Clover API compatible)
         const currentPeriodEnd = await getCurrentPeriodEnd(subscription.id);
 
         // Update profile
-        const { error: updateError } = await supabase
-          .from('profiles')
-          .update({
+        await updateProfileAtomic({
+          userId,
+          updates: {
             plan_id: plan.plan_id,
-            active: subscription.status === 'active',
+            active: subscription.status === 'active' || subscription.status === 'trialing',
             stripe_subscription_id: subscription.id,
             current_period_end: currentPeriodEnd,
-          })
-          .eq('id', userId);
+            subscription_status: subscription.status,
+            pending_plan_change: false,
+            target_plan_id: null,
+          },
+        });
 
-        if (updateError) {
-          console.error('[Webhook] Error updating profile:', updateError);
-        } else {
-          console.log('✅ Subscription plan updated:', {
-            userId,
-            plan: plan.name,
-            planId: plan.plan_id,
-            status: subscription.status,
-          });
-        }
+        console.log('✅ Subscription plan updated:', {
+          userId,
+          plan: plan.name,
+          planId: plan.plan_id,
+          status: subscription.status,
+        });
 
         break;
       }
@@ -264,6 +301,7 @@ export async function POST(req: Request) {
         console.log('[Webhook] Subscription updated:', {
           subscriptionId: subscription.id,
           status: subscription.status,
+          cancelAtPeriodEnd: subscription.cancel_at_period_end,
         });
 
         const priceId = subscription.items.data[0]?.price.id;
@@ -287,6 +325,17 @@ export async function POST(req: Request) {
 
         const userId = profile.id;
 
+        // Validate subscription status
+        if (!isValidSubscriptionStatus(subscription.status)) {
+          console.warn('[Webhook] Unknown subscription status:', subscription.status);
+          await logAlert({
+            type: 'unknown_status',
+            severity: 'warning',
+            message: `Unknown subscription status in update: ${subscription.status}`,
+            metadata: { status: subscription.status, subscriptionId: subscription.id },
+          });
+        }
+
         // Find NEW plan by price_id
         const { data: newPlan, error: planError } = await supabase
           .from('plans')
@@ -297,18 +346,17 @@ export async function POST(req: Request) {
         if (planError || !newPlan) {
           console.error('[Webhook] Plan not found for price_id:', priceId);
           // Update status only
-          const subData = subscription as unknown as Record<string, unknown>;
-          const currentPeriodEnd = typeof subData.current_period_end === 'number'
-            ? new Date(subData.current_period_end * 1000).toISOString()
-            : null;
+          const currentPeriodEnd = await getCurrentPeriodEnd(subscription.id);
 
-          await supabase
-            .from('profiles')
-            .update({
-              active: subscription.status === 'active',
+          await updateProfileAtomic({
+            userId,
+            updates: {
+              active: subscription.status === 'active' || subscription.status === 'trialing',
               current_period_end: currentPeriodEnd,
-            })
-            .eq('id', userId);
+              subscription_status: subscription.status,
+              cancel_at_period_end: subscription.cancel_at_period_end || false,
+            },
+          });
 
           console.log('[Webhook] Updated subscription status without plan change');
           break;
@@ -331,14 +379,18 @@ export async function POST(req: Request) {
 
         const isDowngrade = oldPlan && newPlan.monthly_limit < oldPlan.monthly_limit;
 
-        // Update profile with new plan
+        // Prepare update data
         const updateData: Record<string, unknown> = {
           plan_id: newPlan.plan_id,
-          active: subscription.status === 'active',
+          active: subscription.status === 'active' || subscription.status === 'trialing',
           current_period_end: currentPeriodEnd,
+          subscription_status: subscription.status,
+          cancel_at_period_end: subscription.cancel_at_period_end || false,
+          pending_plan_change: false,
+          target_plan_id: null,
         };
 
-        // ✅ SANITY CHECK: Reset usage on downgrade, keep on upgrade
+        // ✅ Reset usage on downgrade, keep on upgrade
         if (isDowngrade) {
           updateData.plan_used = 0;
           console.log('[Webhook] Downgrade detected, resetting usage to 0');
@@ -346,22 +398,18 @@ export async function POST(req: Request) {
           console.log('[Webhook] Upgrade detected, preserving usage');
         }
 
-        const { error: updateError } = await supabase
-          .from('profiles')
-          .update(updateData)
-          .eq('id', userId);
+        await updateProfileAtomic({
+          userId,
+          updates: updateData,
+        });
 
-        if (updateError) {
-          console.error('[Webhook] Error updating profile:', updateError);
-        } else {
-          console.log('✅ Subscription updated:', {
-            userId,
-            plan: newPlan.name,
-            planId: newPlan.plan_id,
-            status: subscription.status,
-            isDowngrade,
-          });
-        }
+        console.log('✅ Subscription updated:', {
+          userId,
+          plan: newPlan.name,
+          planId: newPlan.plan_id,
+          status: subscription.status,
+          isDowngrade,
+        });
 
         break;
       }
@@ -370,12 +418,15 @@ export async function POST(req: Request) {
         const subscription = event.data.object as Stripe.Subscription;
         const subData = subscription as unknown as Record<string, unknown>;
 
-        console.log('[Webhook] Subscription deleted:', subscription.id);
+        console.log('[Webhook] Subscription deleted:', subscription.id, {
+          cancelAtPeriodEnd: subscription.cancel_at_period_end,
+          currentPeriodEnd: subData.current_period_end,
+        });
 
         // Find user
         const { data: profile, error: profileError } = await supabase
           .from('profiles')
-          .select('id')
+          .select('id, plan_id')
           .eq('stripe_subscription_id', subscription.id)
           .single();
 
@@ -384,7 +435,7 @@ export async function POST(req: Request) {
           break;
         }
 
-        // ✅ GRACE PERIOD CHECK: Don't downgrade immediately
+        // ✅ GRACE PERIOD CHECK: Preserve access until period end
         const currentPeriodEnd = typeof subData.current_period_end === 'number'
           ? new Date(subData.current_period_end * 1000)
           : null;
@@ -393,31 +444,39 @@ export async function POST(req: Request) {
         const isGracePeriod = currentPeriodEnd && currentPeriodEnd > now;
 
         if (isGracePeriod) {
-          // User cancelled but still has paid access until period end
-          console.log('[Webhook] Subscription cancelled, keeping access until:', currentPeriodEnd.toISOString());
+          // ✅ FIX: User has paid access until period end - KEEP active=true and plan_id
+          console.log('[Webhook] Subscription cancelled (grace period), keeping access until:', currentPeriodEnd.toISOString());
 
-          // Set plan_id to null (user will see "No Plan" in UI) but keep period_end
-          await supabase
-            .from('profiles')
-            .update({
-              plan_id: null, // Clear plan (UI shows "No active subscription")
-              active: false, // Mark as non-renewing
-              current_period_end: currentPeriodEnd.toISOString(), // Keep for grace period tracking
-            })
-            .eq('id', profile.id);
+          await updateProfileAtomic({
+            userId: profile.id,
+            updates: {
+              // ✅ KEEP plan_id (user still has plan)
+              // ✅ KEEP active=true (user has access)
+              active: true,
+              cancel_at_period_end: true, // Mark as non-renewing
+              current_period_end: currentPeriodEnd.toISOString(),
+              subscription_status: 'canceled',
+            },
+          });
 
-          console.log('✅ Subscription cancelled (grace period until):', profile.id, currentPeriodEnd);
+          console.log('✅ Subscription cancelled (grace period):', profile.id, currentPeriodEnd);
         } else {
-          // Period has ended, clear plan completely
-          await supabase
-            .from('profiles')
-            .update({
-              plan_id: null, // Clear plan (UI shows "No Plan")
+          // Immediate cancellation - period has ended, clear plan completely
+          console.log('[Webhook] Subscription ended immediately, clearing plan');
+
+          await updateProfileAtomic({
+            userId: profile.id,
+            updates: {
+              plan_id: null, // Clear plan
               active: false,
               current_period_end: null,
               plan_used: 0, // Reset usage
-            })
-            .eq('id', profile.id);
+              cancel_at_period_end: false,
+              subscription_status: 'canceled',
+              pending_plan_change: false,
+              target_plan_id: null,
+            },
+          });
 
           console.log('✅ Subscription ended, plan cleared:', profile.id);
         }
@@ -429,7 +488,7 @@ export async function POST(req: Request) {
         const invoice = event.data.object as Stripe.Invoice;
         const invoiceData = invoice as unknown as Record<string, unknown>;
 
-        // Extract subscription ID (can be in subscription field or lines.data[0].subscription)
+        // Extract subscription ID (with multiple fallbacks for Clover API)
         let subscriptionId = invoiceData.subscription as string | null;
 
         // Fallback: check invoice lines for subscription
@@ -452,37 +511,11 @@ export async function POST(req: Request) {
           }
         }
 
-        // Fallback: parent.subscription_details.subscription (Clover/Upgrade scenarios)
-        if (!subscriptionId && invoiceData.parent) {
-          const parent = invoiceData.parent as Record<string, unknown>;
-          const parentSubDetails = parent.subscription_details as Record<string, unknown>;
-          if (parentSubDetails?.subscription) {
-            subscriptionId = parentSubDetails.subscription as string;
-            console.log('[Webhook] Found subscriptionId in parent.subscription_details (Clover/Upgrade):', subscriptionId);
-          }
-        }
-
-        // Fallback #4: lines[0].parent.subscription_item_details.subscription (Upgrade scenarios)
-        if (!subscriptionId && invoiceData.lines) {
-          const lines = invoiceData.lines as unknown as Record<string, unknown>;
-          const linesData = lines.data as unknown[];
-          const firstLine = linesData?.[0] as Record<string, unknown>;
-          const lineParent = firstLine?.parent as Record<string, unknown>;
-          const itemDetails = lineParent?.subscription_item_details as Record<string, unknown>;
-          if (itemDetails?.subscription) {
-            subscriptionId = itemDetails.subscription as string;
-            console.log('[Webhook] Found subscriptionId in subscription_item_details:', subscriptionId);
-          }
-        }
-
-        console.log("[Webhook] FULL INVOICE DATA:", JSON.stringify(invoiceData, null, 2));
-
         console.log('[Webhook] Invoice payment succeeded:', {
           invoiceId: invoice.id,
           subscriptionId,
           periodStart: invoiceData.period_start,
           periodEnd: invoiceData.period_end,
-          hasLines: !!invoiceData.lines,
         });
 
         // Only process if this is a subscription invoice
@@ -505,26 +538,15 @@ export async function POST(req: Request) {
 
         const userId = profile.id;
 
-        // ✅ NEW BILLING PERIOD: Reset usage counter
+        // ✅ NEW BILLING PERIOD: Reset usage counter and ensure active
         const updateData: Record<string, unknown> = {
           plan_used: 0,
-          active: true, // Ensure subscription stays active (payment succeeded)
+          active: true, // Payment succeeded, ensure active
+          cancel_at_period_end: false, // Payment succeeded, subscription renewed
         };
 
         // Get current_period_end from subscription (Clover API compatible)
-        let currentPeriodEnd = await getCurrentPeriodEnd(subscriptionId);
-
-        // Fallback: if still null, try to get from invoice.lines[0].period.end
-        if (!currentPeriodEnd && invoiceData.lines) {
-          const lines = invoiceData.lines as unknown as Record<string, unknown>;
-          const linesData = lines.data as unknown[];
-          const firstLine = linesData?.[0] as Record<string, unknown>;
-          const period = firstLine?.period as Record<string, unknown>;
-          if (period?.end && typeof period.end === 'number') {
-            currentPeriodEnd = new Date(period.end * 1000).toISOString();
-            console.log('[Webhook] Using period.end from subscription_item_details:', currentPeriodEnd);
-          }
-        }
+        const currentPeriodEnd = await getCurrentPeriodEnd(subscriptionId);
 
         if (currentPeriodEnd) {
           updateData.current_period_end = currentPeriodEnd;
@@ -533,20 +555,16 @@ export async function POST(req: Request) {
           console.warn('[Webhook] current_period_end is null - check helper logs for reason');
         }
 
-        const { error: updateError } = await supabase
-          .from('profiles')
-          .update(updateData)
-          .eq('id', userId);
+        await updateProfileAtomic({
+          userId,
+          updates: updateData,
+        });
 
-        if (updateError) {
-          console.error('[Webhook] Error resetting usage:', updateError);
-        } else {
-          console.log('✅ Usage reset for new period:', userId, {
-            plan_used: 0,
-            current_period_end: updateData.current_period_end || 'not updated',
-            active: true,
-          });
-        }
+        console.log('✅ Usage reset for new period:', userId, {
+          plan_used: 0,
+          current_period_end: updateData.current_period_end || 'not updated',
+          active: true,
+        });
 
         break;
       }
@@ -583,7 +601,6 @@ export async function POST(req: Request) {
         const userId = profile.id;
 
         // ✅ RETRY LOGIC: Only deactivate if Stripe has given up (no more retry attempts)
-        // Stripe will send this event multiple times as it retries (up to 4 attempts)
         const hasMoreAttempts = invoiceData.next_payment_attempt !== null;
 
         if (hasMoreAttempts) {
@@ -593,19 +610,23 @@ export async function POST(req: Request) {
         }
 
         // Final attempt failed, deactivate and clear plan
-        const { error: updateError } = await supabase
-          .from('profiles')
-          .update({
+        await updateProfileAtomic({
+          userId,
+          updates: {
             active: false,
-            plan_id: null, // Clear plan (UI shows "No active subscription")
-          })
-          .eq('id', userId);
+            plan_id: null, // Clear plan (no access)
+            subscription_status: 'unpaid',
+          },
+        });
 
-        if (updateError) {
-          console.error('[Webhook] Error deactivating subscription:', updateError);
-        } else {
-          console.log('⚠️ Payment failed (final attempt), subscription deactivated and plan cleared:', userId);
-        }
+        await logAlert({
+          type: 'subscription_mismatch',
+          severity: 'warning',
+          message: 'Payment failed (final attempt), subscription deactivated',
+          metadata: { userId, subscriptionId: invoiceData.subscription },
+        });
+
+        console.log('⚠️ Payment failed (final attempt), subscription deactivated and plan cleared:', userId);
 
         break;
       }

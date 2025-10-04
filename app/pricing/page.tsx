@@ -37,10 +37,10 @@ export default async function PricingPage() {
     );
   }
 
-  // Get user's current plan
+  // Get user's current plan and pending state
   const { data: currentProfile } = await supabase
     .from('profiles')
-    .select('plan_id, active')
+    .select('plan_id, active, pending_plan_change')
     .eq('id', user.id)
     .single();
 
@@ -173,10 +173,14 @@ export default async function PricingPage() {
                   <input type="hidden" name="currency" value={currency} />
                   <button
                     type="submit"
-                    disabled={!isAvailable || isCurrentPlan}
+                    disabled={!isAvailable || isCurrentPlan || currentProfile?.pending_plan_change}
                     className="bg-primary text-primary-foreground w-full py-3 rounded-lg hover:bg-primary/80 transition disabled:opacity-50 disabled:cursor-not-allowed font-medium"
                   >
-                    {isCurrentPlan
+                    {currentProfile?.pending_plan_change
+                      ? isPl
+                        ? 'Przetwarzanie...'
+                        : 'Processing...'
+                      : isCurrentPlan
                       ? isPl
                         ? 'Aktywny'
                         : 'Active'
